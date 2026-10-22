@@ -1,8 +1,8 @@
-# FLW Clock Studio 🕰️
+# FLW Clock 🕰️
 
 An ESP32-S3 firmware and asset pipeline designed to drive four synchronized SSD1325 128x64 OLED displays in portrait orientation. The device functions as a precision network-synchronized digital clock that alternates between displaying the current time and cycling through random four-letter words (FLW).
 
-The firmware runs on an ESP32-S3 development board (specifically adapted from an ESP32-1732S019 / CYD board with the original LCD panel removed), taking advantage of its 16 MB flash memory and robust dual 3.3V power rails. Fonts are compiled directly into C++ `PROGMEM` data arrays via an automated Python pre-build script, eliminating filesystem overhead and guaranteeing sub-millisecond panel synchronization over SPI.
+The firmware runs on an ESP32-S3 development board. Fonts are compiled directly into C++ `PROGMEM` data arrays via an automated Python pre-build script, eliminating filesystem overhead and guaranteeing sub-millisecond panel synchronization over SPI.
 
 ---
 
@@ -22,7 +22,6 @@ The firmware runs on an ESP32-S3 development board (specifically adapted from an
 
 ## 🛠 Hardware & Wiring
 
-The setup utilizes connector **P1** and power header **P2** on the ESP32-1732S019 (Cheap Yellow Display) board.
 
 ### Pin Assignment Table
 
