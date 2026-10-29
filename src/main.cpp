@@ -29,8 +29,6 @@ uint8_t panelBuffers[4][4096];
 #define OLED_CS3_PIN   18
 
 const char* ntpServer = "192.168.1.1";
-const long  gmtOffset_sec = 3600;       
-const int   daylightOffset_sec = 3600;  
 
 DisplaySSD1325_128x64_SPI display0(-1, {-1, OLED_CS0_PIN, OLED_DC_PIN, 10000000, OLED_CLK_PIN, OLED_MOSI_PIN});
 DisplaySSD1325_128x64_SPI display1(-1, {-1, OLED_CS1_PIN, OLED_DC_PIN, 10000000, OLED_CLK_PIN, OLED_MOSI_PIN});
@@ -39,6 +37,33 @@ DisplaySSD1325_128x64_SPI display3(-1, {-1, OLED_CS3_PIN, OLED_DC_PIN, 10000000,
 
 DisplaySSD1325_128x64_SPI* displays[4] = { &display0, &display1, &display2, &display3 };
 const uint8_t csPins[4] = { OLED_CS0_PIN, OLED_CS1_PIN, OLED_CS2_PIN, OLED_CS3_PIN };
+
+// ==============================================================================
+// TIMEZONE & DAYLIGHT SAVINGS (POSIX RULES)
+// ==============================================================================
+struct TimezoneEntry {
+    const char* name;
+    const char* tz_auto;   // Automatic seasonal switch
+    const char* tz_winter; // Standard winter time
+    const char* tz_summer; // Daylight summer time
+};
+
+const TimezoneEntry TIMEZONES[] = {
+    { "Europe/Copenhagen (Denmark, CET/CEST)", "CET-1CEST,M3.5.0,M10.5.0/3", "CET-1", "CEST-2" },
+    { "Europe/London (UK, GMT/BST)",           "GMT0BST,M3.5.0/1,M10.5.0",   "GMT0",  "BST-1" },
+    { "Europe/Helsinki (EET/EEST)",            "EET-2EEST,M3.5.0/3,M10.5.0/4","EET-2", "EEST-3" },
+    { "America/New_York (US Eastern)",         "EST5EDT,M3.2.0,M11.1.0",     "EST5",  "EDT4" },
+    { "America/Chicago (US Central)",          "CST6CDT,M3.2.0,M11.1.0",     "CST6",  "CDT5" },
+    { "America/Denver (US Mountain)",          "MST7MDT,M3.2.0,M11.1.0",     "MST7",  "MDT6" },
+    { "America/Los_Angeles (US Pacific)",      "PST8PDT,M3.2.0,M11.1.0",     "PST8",  "PDT7" },
+    { "UTC",                                   "UTC0",                       "UTC0",  "UTC0" },
+    { "Asia/Tokyo (JST, No DST)",              "JST-9",                      "JST-9", "JST-9" },
+    { "Australia/Sydney (AEST/AEDT)",          "AEST-10AEDT,M10.1.0,M4.1.0/3","AEST-10","AEDT-11" }
+};
+const uint8_t TIMEZONE_COUNT = sizeof(TIMEZONES) / sizeof(TIMEZONES[0]);
+
+volatile uint8_t cfg_timezone = 0; // Default: Europe/Copenhagen
+volatile uint8_t cfg_dst_mode = 0; // 0 = Auto DST, 1 = Winter Time, 2 = Summer Time
 
 // --- Max Brightness Hardware Drive Parameters ---
 const uint8_t FIXED_PHASE1      = 0x08; // Phase 1 Discharge Clocks
@@ -228,6 +253,19 @@ void applySettingsToAllPanels() {
     }
 }
 
+const char* getActiveTzRule() {
+    if (cfg_timezone >= TIMEZONE_COUNT) cfg_timezone = 0;
+    if (cfg_dst_mode == 1) return TIMEZONES[cfg_timezone].tz_winter;
+    if (cfg_dst_mode == 2) return TIMEZONES[cfg_timezone].tz_summer;
+    return TIMEZONES[cfg_timezone].tz_auto;
+}
+
+void applyTimezone() {
+    setenv("TZ", getActiveTzRule(), 1);
+    tzset();
+    forceRedraw = true;
+}
+
 void drawDotCursor(DisplaySSD1325_128x64_SPI* d, int cx = 64, int cy = 58) {
     static const uint8_t dot8x8[8][8] = {
         { 0x00, 0x03, 0x05, 0x05, 0x05, 0x05, 0x03, 0x00 },
@@ -262,10 +300,14 @@ void loadSavedPreferences() {
     cfg_flw_fonts_mask  = prefs.getUInt("flw_mask", 0xFFFFFFFF);
     cfg_contrast_normal = prefs.getUChar("cntr_norm", 255);
     cfg_contrast_night  = prefs.getUChar("cntr_night", 0);
+    cfg_timezone        = prefs.getUChar("tz_idx", 0);
+    cfg_dst_mode        = prefs.getUChar("dst_mode", 0);
     prefs.end();
 
     if (cfg_font_clock >= FONT_COUNT) cfg_font_clock = 0;
     if (cfg_font_flw >= FONT_COUNT)   cfg_font_flw = 0;
+    if (cfg_timezone >= TIMEZONE_COUNT) cfg_timezone = 0;
+    if (cfg_dst_mode > 2) cfg_dst_mode = 0;
 }
 
 void savePreferences() {
@@ -279,6 +321,8 @@ void savePreferences() {
     prefs.putUInt("flw_mask", cfg_flw_fonts_mask);
     prefs.putUChar("cntr_norm", cfg_contrast_normal);
     prefs.putUChar("cntr_night", cfg_contrast_night);
+    prefs.putUChar("tz_idx", cfg_timezone);
+    prefs.putUChar("dst_mode", cfg_dst_mode);
     prefs.end();
 }
 
@@ -398,6 +442,22 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div class="card">
+        <h3>Time & Regional Settings</h3>
+        <div class="control-group">
+            <label>Time Zone:</label>
+            <select id="timezone" onchange="updateParam()"></select>
+        </div>
+        <div class="control-group">
+            <label>Daylight Saving (Summer / Winter Time):</label>
+            <select id="dst_mode" onchange="updateParam()">
+                <option value="0">Automatic (Regional Summer/Winter rules)</option>
+                <option value="1">Winter Time (Standard Time)</option>
+                <option value="2">Summer Time (Daylight Time)</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="card">
         <h3>Font & Style Controls</h3>
         <div class="control-group">
             <label>Active Time Font:</label>
@@ -468,6 +528,14 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
             fetch('/api/get')
                 .then(r => r.json())
                 .then(d => {
+                    let tz = document.getElementById('timezone');
+                    tz.innerHTML = '';
+                    d.timezones.forEach((name, idx) => {
+                        tz.add(new Option(name, idx));
+                    });
+                    tz.value = d.timezone;
+                    document.getElementById('dst_mode').value = d.dst_mode;
+
                     let fc = document.getElementById('font_clock');
                     let ff = document.getElementById('font_flw');
                     let tp = document.getElementById('time_pool');
@@ -516,6 +584,8 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
                 document.querySelectorAll('.f-mask:checked').forEach(cb => flwMask |= (1 << parseInt(cb.value)));
 
                 let p = new URLSearchParams();
+                p.append('timezone', document.getElementById('timezone').value);
+                p.append('dst_mode', document.getElementById('dst_mode').value);
                 p.append('font_clock', document.getElementById('font_clock').value);
                 p.append('font_flw', document.getElementById('font_flw').value);
                 p.append('rotate_fonts', document.getElementById('rotate_fonts').value);
@@ -566,7 +636,9 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
 void handleRoot() { server.send(200, "text/html", HTTP_INDEX); }
 
 void handleGetApi() {
-    String json = "{\"font_clock\":" + String(cfg_font_clock) +
+    String json = "{\"timezone\":" + String(cfg_timezone) +
+                  ",\"dst_mode\":" + String(cfg_dst_mode) +
+                  ",\"font_clock\":" + String(cfg_font_clock) +
                   ",\"font_flw\":" + String(cfg_font_flw) +
                   ",\"rotate_fonts\":" + String(cfg_rotate_fonts ? 1 : 0) +
                   ",\"time_mask\":" + String(cfg_time_fonts_mask) +
@@ -575,7 +647,12 @@ void handleGetApi() {
                   ",\"nightmode\":" + String(cfg_nightmode) +
                   ",\"contrast_normal\":" + String(cfg_contrast_normal) +
                   ",\"contrast_night\":" + String(cfg_contrast_night) +
-                  ",\"font_names\":[";
+                  ",\"timezones\":[";
+    for (uint8_t i = 0; i < TIMEZONE_COUNT; i++) {
+        json += "\"" + String(TIMEZONES[i].name) + "\"";
+        if (i < TIMEZONE_COUNT - 1) json += ",";
+    }
+    json += "],\"font_names\":[";
     for (uint8_t i = 0; i < FONT_COUNT; i++) {
         json += "\"" + String(FONT_NAMES[i]) + "\"";
         if (i < FONT_COUNT - 1) json += ",";
@@ -585,6 +662,22 @@ void handleGetApi() {
 }
 
 void handleSetApi() {
+    bool timeChanged = false;
+    if (server.hasArg("timezone")) {
+        uint8_t newTz = server.arg("timezone").toInt();
+        if (newTz != cfg_timezone && newTz < TIMEZONE_COUNT) {
+            cfg_timezone = newTz;
+            timeChanged = true;
+        }
+    }
+    if (server.hasArg("dst_mode")) {
+        uint8_t newDst = server.arg("dst_mode").toInt();
+        if (newDst != cfg_dst_mode && newDst <= 2) {
+            cfg_dst_mode = newDst;
+            timeChanged = true;
+        }
+    }
+
     if (server.hasArg("font_clock"))      cfg_font_clock      = server.arg("font_clock").toInt();
     if (server.hasArg("font_flw"))        cfg_font_flw        = server.arg("font_flw").toInt();
     if (server.hasArg("rotate_fonts"))    cfg_rotate_fonts    = (server.arg("rotate_fonts").toInt() == 1);
@@ -596,6 +689,9 @@ void handleSetApi() {
     if (server.hasArg("contrast_night"))  cfg_contrast_night  = server.arg("contrast_night").toInt();
 
     savePreferences();
+    if (timeChanged) {
+        applyTimezone();
+    }
     settingsChanged = true;
     server.send(200, "text/plain", "OK");
 }
@@ -694,8 +790,8 @@ void setup() {
     String ip = WiFi.localIP().toString();
     int dot1 = ip.indexOf('.');
     int dot2 = ip.indexOf('.', dot1 + 1);
-    String ipPart1 = ip.substring(0, dot2 + 1); // e.g. "192.168."
-    String ipPart2 = ip.substring(dot2 + 1);      // e.g. "1.100"
+    String ipPart1 = ip.substring(0, dot2 + 1);
+    String ipPart2 = ip.substring(dot2 + 1);     
 
     for (int i = 0; i < 4; i++) {
         displays[i]->clear();
@@ -713,7 +809,7 @@ void setup() {
     drawStrHorizontalOnRotatedDisplay(&display1, 4, 58, "flwclock");
     drawStrHorizontalOnRotatedDisplay(&display1, 4, 72, ".local");
 
-    delay(4000); // Hold boot text on Panels 0 & 1 for 4 seconds
+    delay(4000); 
     // =========================================================================
 
     server.on("/", handleRoot);
@@ -726,7 +822,9 @@ void setup() {
     server.onNotFound([]() { server.send(404, "text/plain", "404: Not Found"); });
     server.begin();
 
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    // Initialize network time using standard POSIX timezone rule
+    configTzTime(getActiveTzRule(), ntpServer);
+
     modeStartTime = millis();
 
     xTaskCreatePinnedToCore(
