@@ -4,31 +4,28 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <WiFiManager.h>  
+#include <Update.h>       
 #include "time.h"
-#include "secrets.h"
 #include "lcdgfx.h"
 #include "generated_assets.h"
 #include "soc/soc.h"             
 #include "soc/rtc_cntl_reg.h"
 
-// 16KB RAM buffer holding all 4 screen panel glyphs simultaneously
 uint8_t panelBuffers[4][4096];
 
 #define WDT_TIMEOUT_SECONDS 10
 
-// Shared SPI Pins (CYD P1 Header)
 #define OLED_RST_PIN   4   
 #define OLED_DC_PIN    5   
 #define OLED_CLK_PIN   6  
 #define OLED_MOSI_PIN  7  
-
-// Dedicated CS Pins (CYD P1 Header)
 #define OLED_CS0_PIN   15
 #define OLED_CS1_PIN   16
 #define OLED_CS2_PIN   17
 #define OLED_CS3_PIN   18
 
-const char* ntpServer = "192.168.1.1";
+char ntpServerName[40] = "pool.ntp.org";
 
 DisplaySSD1325_128x64_SPI display0(-1, {-1, OLED_CS0_PIN, OLED_DC_PIN, 10000000, OLED_CLK_PIN, OLED_MOSI_PIN});
 DisplaySSD1325_128x64_SPI display1(-1, {-1, OLED_CS1_PIN, OLED_DC_PIN, 10000000, OLED_CLK_PIN, OLED_MOSI_PIN});
@@ -39,13 +36,13 @@ DisplaySSD1325_128x64_SPI* displays[4] = { &display0, &display1, &display2, &dis
 const uint8_t csPins[4] = { OLED_CS0_PIN, OLED_CS1_PIN, OLED_CS2_PIN, OLED_CS3_PIN };
 
 // ==============================================================================
-// TIMEZONE & DAYLIGHT SAVINGS (POSIX RULES)
+// TIMEZONE & DAYLIGHT SAVINGS 
 // ==============================================================================
 struct TimezoneEntry {
     const char* name;
-    const char* tz_auto;   // Automatic seasonal switch
-    const char* tz_winter; // Standard winter time
-    const char* tz_summer; // Daylight summer time
+    const char* tz_auto;   
+    const char* tz_winter; 
+    const char* tz_summer; 
 };
 
 const TimezoneEntry TIMEZONES[] = {
@@ -62,25 +59,21 @@ const TimezoneEntry TIMEZONES[] = {
 };
 const uint8_t TIMEZONE_COUNT = sizeof(TIMEZONES) / sizeof(TIMEZONES[0]);
 
-volatile uint8_t cfg_timezone = 0; // Default: Europe/Copenhagen
-volatile uint8_t cfg_dst_mode = 0; // 0 = Auto DST, 1 = Winter Time, 2 = Summer Time
+volatile uint8_t cfg_timezone = 0; 
+volatile uint8_t cfg_dst_mode = 0; 
 
-// --- Max Brightness Hardware Drive Parameters ---
-const uint8_t FIXED_PHASE1      = 0x08; // Phase 1 Discharge Clocks
-const uint8_t FIXED_PRECHARGE_V = 0x1F; // Max Pre-charge Voltage (0x1F = 1.00 x VCC)
-const uint8_t FIXED_CONTRAST    = 255;  // Max Daytime Contrast (255 / 0xFF)
-const uint8_t FIXED_PHASE2      = 15;   // Max Phase 2 Pre-charge Clocks (15 / 0x0F)
-const uint8_t FIXED_VCOMH       = 31;   // Max VCOMH Deselect (31 / 0x1F)
-const uint8_t FIXED_PRECHARGE2  = 15;   // Max 2nd Pre-charge Period (15 / 0x0F)
-const uint8_t FIXED_OSC_FREQ    = 0x0F; // Max Oscillator Frequency
-const uint8_t FIXED_CLK_DIV     = 0x00; // Divide by 1 for max refresh rate
-const uint8_t FIXED_GAMMA       = 0;    // Linear Gamma Preset
+// --- Brightness & Hardware ---
+const uint8_t FIXED_PHASE1      = 0x08; 
+const uint8_t FIXED_PRECHARGE_V = 0x1F; 
+const uint8_t FIXED_PHASE2      = 15;   
+const uint8_t FIXED_VCOMH       = 31;   
+const uint8_t FIXED_PRECHARGE2  = 15;   
+const uint8_t FIXED_OSC_FREQ    = 0x0F; 
+const uint8_t FIXED_CLK_DIV     = 0x00; 
+const uint8_t FIXED_GAMMA       = 0;    
 
-// --- Configurable Brightness State ---
-volatile uint8_t cfg_contrast_normal = 255; // Full Brightness Default
-volatile uint8_t cfg_contrast_night  = 0;   // Night Brightness
-
-// --- Configurable State ---
+volatile uint8_t cfg_contrast_normal = 255; 
+volatile uint8_t cfg_contrast_night  = 0;   
 volatile uint8_t cfg_font_clock = 0;    
 volatile uint8_t cfg_font_flw   = 0;    
 volatile bool    cfg_invert     = false;
@@ -89,29 +82,21 @@ volatile bool    settingsChanged = false;
 
 Preferences prefs;
 
-// --- Hourly Font Rotation Configuration ---
+// --- Bugfix: Default masks to 1 (only first font enabled) instead of 0xFFFFFFFF ---
 volatile bool     cfg_rotate_fonts    = true;   
-volatile uint32_t cfg_time_fonts_mask = 0xFFFFFFFF; 
-volatile uint32_t cfg_flw_fonts_mask  = 0xFFFFFFFF; 
+volatile uint32_t cfg_time_fonts_mask = 1; 
+volatile uint32_t cfg_flw_fonts_mask  = 1; 
 
 uint8_t getRandomFontFromMask(uint32_t mask, uint8_t currentFont) {
     uint8_t validIndices[FONT_COUNT];
     uint8_t count = 0;
-    
     for (uint8_t i = 0; i < FONT_COUNT; i++) {
-        if (mask & (1UL << i)) {
-            validIndices[count++] = i;
-        }
+        if (mask & (1UL << i)) validIndices[count++] = i;
     }
-    
     if (count == 0) return 0;
     if (count == 1) return validIndices[0];
-
     uint8_t chosen;
-    do {
-        chosen = validIndices[esp_random() % count];
-    } while (count > 1 && chosen == currentFont);
-
+    do { chosen = validIndices[esp_random() % count]; } while (count > 1 && chosen == currentFont);
     return chosen;
 }
 
@@ -135,7 +120,6 @@ const uint8_t* getAssetForChar(char c, uint8_t fontIdx) {
     return (const uint8_t*) pgm_read_ptr(&(FONT_GLYPHS[fontIdx][charIdx]));
 }
 
-// Pre-fetches all 4 characters into RAM staging buffer
 void loadWordToBuffers(const char* word4, uint8_t fontIdx) {
     for (int i = 0; i < 4; i++) {
         const uint8_t* ptr = getAssetForChar(word4[i], fontIdx);
@@ -143,16 +127,12 @@ void loadWordToBuffers(const char* word4, uint8_t fontIdx) {
     }
 }
 
-// Flushes RAM buffers to the OLED panels over SPI
 void renderBatchToDisplays() {
     for (int i = 0; i < 4; i++) {
         displays[i]->drawBitmap4(0, 0, 128, 64, panelBuffers[i]);
     }
 }
 
-// ==============================================================================
-// HORIZONTAL TEXT HELPER FOR 90° CLOCKWISE ROTATED DISPLAY (64 WIDE x 128 TALL)
-// ==============================================================================
 void drawStrHorizontalOnRotatedDisplay(DisplaySSD1325_128x64_SPI* d, int xv, int yv, const char* str, uint8_t color = 15) {
     d->setColor(color);
     while (*str) {
@@ -165,23 +145,26 @@ void drawStrHorizontalOnRotatedDisplay(DisplaySSD1325_128x64_SPI* d, int xv, int
                     if (line & (1 << row)) {
                         int px = xv + col;
                         int py = yv + row;
-                        if (px >= 0 && px < 64 && py >= 0 && py < 128) {
-                            d->putPixel(py, 63 - px);
-                        }
+                        if (px >= 0 && px < 64 && py >= 0 && py < 128) d->putPixel(py, 63 - px);
                     }
                 }
             }
         }
-        xv += 7; // 6px font width + 1px spacing
+        xv += 7; 
         str++;
     }
 }
 
-enum DisplayMode { MODE_CLOCK, MODE_FLW };
-volatile DisplayMode currentMode = MODE_CLOCK;
+// --- Added MODE_SETUP and MODE_OTA for state machine ---
+enum DisplayMode { MODE_CLOCK, MODE_FLW, MODE_SETUP, MODE_BOOT, MODE_OTA };
+volatile DisplayMode currentMode = MODE_SETUP;
 volatile uint32_t modeStartTime = 0;
 char currentWord[5] = "TIME";
 volatile bool forceRedraw = true;
+
+// Globals to hold IP strings for safe drawing by Core 1
+String bootIpPart1 = "";
+String bootIpPart2 = "";
 
 void selectRandomWord() {
     uint16_t count = FLW_WORD_COUNT;
@@ -203,21 +186,14 @@ bool isNightModeActive() {
     if (cfg_nightmode == 1) {
         time_t nowSecs; time(&nowSecs);
         struct tm timeinfo; localtime_r(&nowSecs, &timeinfo);
-        if (timeinfo.tm_year > 70) {
-            if (timeinfo.tm_hour >= 23 || timeinfo.tm_hour < 7) {
-                return true;
-            }
-        }
+        if (timeinfo.tm_year > 70 && (timeinfo.tm_hour >= 23 || timeinfo.tm_hour < 7)) return true;
     }
     return false;
 }
 
 void configurePanel(DisplaySSD1325_128x64_SPI* d) {
-    bool inNightMode = isNightModeActive();
-
-    uint8_t activeContrast = inNightMode ? cfg_contrast_night : cfg_contrast_normal;
+    uint8_t activeContrast = isNightModeActive() ? cfg_contrast_night : cfg_contrast_normal;
     uint8_t activePhase2 = map(activeContrast, 0, 255, 4, FIXED_PHASE2);
-
     uint8_t clock_byte = ((FIXED_OSC_FREQ & 0x0F) << 4) | (FIXED_CLK_DIV & 0x0F);
     uint8_t phase_byte = ((activePhase2 & 0x0F) << 4) | (FIXED_PHASE1 & 0x0F);
     uint8_t precharge2_byte = 0x80 | (FIXED_PRECHARGE2 & 0x0F);
@@ -227,30 +203,22 @@ void configurePanel(DisplaySSD1325_128x64_SPI* d) {
     d->getInterface().send(0xB1); d->getInterface().send(phase_byte);
     d->getInterface().send(0xBB); d->getInterface().send(FIXED_PRECHARGE_V);
     d->getInterface().send(0xBE); d->getInterface().send(FIXED_VCOMH & 0x1F);
-
     d->getInterface().send(0xB8);
-    for (int i = 0; i < 15; i++) {
-        d->getInterface().send(GAMMA_PRESETS[FIXED_GAMMA][i]);
-    }
-
+    for (int i = 0; i < 15; i++) d->getInterface().send(GAMMA_PRESETS[FIXED_GAMMA][i]);
     d->getInterface().send(0xA0); d->getInterface().send(0x50);
     d->getInterface().send(0xA1); d->getInterface().send(0x00);
     d->getInterface().send(0xA8); d->getInterface().send(0x3F);
     d->getInterface().send(0xA2); d->getInterface().send(0x4C);
     d->getInterface().send(0xAD); d->getInterface().send(0x02);
-
     d->getInterface().send(cfg_invert ? 0xA7 : 0xA4);
     d->getInterface().send(0x81); d->getInterface().send(activeContrast);
     d->getInterface().send(0x82); d->getInterface().send(precharge2_byte);
-
     d->getInterface().send(0xAF);
     d->getInterface().stop();
 }
 
 void applySettingsToAllPanels() {
-    for (int i = 0; i < 4; i++) {
-        configurePanel(displays[i]);
-    }
+    for (int i = 0; i < 4; i++) configurePanel(displays[i]);
 }
 
 const char* getActiveTzRule() {
@@ -277,14 +245,10 @@ void drawDotCursor(DisplaySSD1325_128x64_SPI* d, int cx = 64, int cy = 58) {
         { 0x03, 0x05, 0x08, 0x0B, 0x0B, 0x08, 0x05, 0x03 },
         { 0x00, 0x03, 0x05, 0x05, 0x05, 0x05, 0x03, 0x00 }
     };
-
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 8; col++) {
             uint8_t val = dot8x8[row][col];
-            if (val > 0) {
-                d->setColor(val);
-                d->putPixel(cx - 3 + col, cy - 3 + row);
-            }
+            if (val > 0) { d->setColor(val); d->putPixel(cx - 3 + col, cy - 3 + row); }
         }
     }
 }
@@ -296,13 +260,23 @@ void loadSavedPreferences() {
     cfg_invert          = prefs.getBool("invert", false);
     cfg_nightmode       = prefs.getUChar("nightmode", 1);
     cfg_rotate_fonts    = prefs.getBool("rotate_f", true);
-    cfg_time_fonts_mask = prefs.getUInt("time_mask", 0xFFFFFFFF);
-    cfg_flw_fonts_mask  = prefs.getUInt("flw_mask", 0xFFFFFFFF);
+    cfg_time_fonts_mask = prefs.getUInt("time_mask", 1);
+    cfg_flw_fonts_mask  = prefs.getUInt("flw_mask", 1);
     cfg_contrast_normal = prefs.getUChar("cntr_norm", 255);
     cfg_contrast_night  = prefs.getUChar("cntr_night", 0);
     cfg_timezone        = prefs.getUChar("tz_idx", 0);
     cfg_dst_mode        = prefs.getUChar("dst_mode", 0);
+    
+    String ntp = prefs.getString("ntp", "pool.ntp.org");
+    strncpy(ntpServerName, ntp.c_str(), sizeof(ntpServerName));
     prefs.end();
+
+    // Sanitize masks to prevent enabling garbage bits
+    uint32_t validMask = (1UL << FONT_COUNT) - 1;
+    cfg_time_fonts_mask &= validMask;
+    cfg_flw_fonts_mask  &= validMask;
+    if (cfg_time_fonts_mask == 0) cfg_time_fonts_mask = 1;
+    if (cfg_flw_fonts_mask == 0)  cfg_flw_fonts_mask = 1;
 
     if (cfg_font_clock >= FONT_COUNT) cfg_font_clock = 0;
     if (cfg_font_flw >= FONT_COUNT)   cfg_font_flw = 0;
@@ -337,6 +311,70 @@ void displayTask(void* parameter) {
     for (;;) {
         uint32_t nowMs = millis();
 
+if (currentMode == MODE_SETUP) {
+            if (forceRedraw) {
+                forceRedraw = false;
+                for (int i=0; i<4; i++) displays[i]->clear();
+                
+                // Display 0: Access Point Info
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 20, "WIFI AP");
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 42, "SSID:");
+                // Start at x=1 to squeeze in the 9-character "FLW-Clock"
+                drawStrHorizontalOnRotatedDisplay(&display0, 1, 58, "FLW-Clock"); 
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 72, "-Setup");
+
+                // Display 1: Portal IP Info
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 20, "PORTAL");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 42, "IP:");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 58, "192.168.");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 72, "4.1");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+if (currentMode == MODE_OTA) {
+            if (forceRedraw) {
+                forceRedraw = false;
+                for (int i=0; i<4; i++) displays[i]->clear();
+                
+                // Display 0: OTA Status
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 20, "FIRMWARE");
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 42, "UPDATE");
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 58, "IN");
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 72, "PROGRESS");
+                
+                // Display 1: OTA Warning
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 20, "PLEASE");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 42, "WAIT...");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 58, "DO NOT");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 72, "UNPLUG!");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (currentMode == MODE_BOOT) {
+            if (forceRedraw) {
+                forceRedraw = false;
+                for (int i=0; i<4; i++) displays[i]->clear();
+                drawStrHorizontalOnRotatedDisplay(&display0, 7, 20, "WIFI OK");
+                drawStrHorizontalOnRotatedDisplay(&display0, 7, 42, "IP:");
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 58, bootIpPart1.c_str());
+                drawStrHorizontalOnRotatedDisplay(&display0, 4, 72, bootIpPart2.c_str());
+                drawStrHorizontalOnRotatedDisplay(&display1, 7, 20, "MDNS OK");
+                drawStrHorizontalOnRotatedDisplay(&display1, 7, 42, "HOST:");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 58, "flwclock");
+                drawStrHorizontalOnRotatedDisplay(&display1, 4, 72, ".local");
+            }
+            if (nowMs - modeStartTime > 4000) {
+                currentMode = MODE_CLOCK;
+                forceRedraw = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         bool currentNightState = isNightModeActive();
         if (currentNightState != lastNightState) {
             lastNightState = currentNightState;
@@ -349,7 +387,6 @@ void displayTask(void* parameter) {
             forceRedraw = true;
         }
 
-        // State Machine Transitions
         if (currentMode == MODE_CLOCK && (nowMs - modeStartTime >= 20000)) { 
             currentMode = MODE_FLW;
             modeStartTime = nowMs;
@@ -363,7 +400,6 @@ void displayTask(void* parameter) {
             forceRedraw = true;
         }
 
-        // Render Clock Mode
         if (currentMode == MODE_CLOCK) {
             time_t nowSecs; time(&nowSecs);
             struct tm timeinfo; localtime_r(&nowSecs, &timeinfo);
@@ -377,9 +413,7 @@ void displayTask(void* parameter) {
                 forceRedraw = true;
             }
 
-            if (timeinfo.tm_hour == 1 && timeinfo.tm_min == 23 && timeinfo.tm_sec == 0) {
-                ESP.restart();
-            }
+            if (timeinfo.tm_hour == 1 && timeinfo.tm_min == 23 && timeinfo.tm_sec == 0) ESP.restart();
 
             bool currentCursorState = ((nowMs % 2000) < 1000);
             bool minuteChanged = (timeinfo.tm_min != lastMinute);
@@ -389,28 +423,18 @@ void displayTask(void* parameter) {
                 lastMinute = timeinfo.tm_min;
                 forceRedraw = false;
                 lastCursorState = currentCursorState;
-
                 char clockStr[5];
                 snprintf(clockStr, sizeof(clockStr), "%02d%02d", timeinfo.tm_hour, timeinfo.tm_min);
-
                 loadWordToBuffers(clockStr, cfg_font_clock);
                 renderBatchToDisplays();
-
-                if (currentCursorState) {
-                    drawDotCursor(&display0, 64, 58);
-                }
+                if (currentCursorState) drawDotCursor(&display0, 64, 58);
             } 
             else if (cursorChanged) {
                 lastCursorState = currentCursorState;
-
                 display0.drawBitmap4(0, 0, 128, 64, panelBuffers[0]);
-
-                if (currentCursorState) {
-                    drawDotCursor(&display0, 64, 58);
-                }
+                if (currentCursorState) drawDotCursor(&display0, 64, 58);
             }
         }
-
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -423,7 +447,7 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>FLW Clock Studio</title><style>
+    <title>FLW Clock</title><style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #e0e6ed; margin: 0; padding: 20px; }
         .card { background: #1a1d2d; max-width: 520px; margin: 0 auto 20px auto; padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.6); }
         h2, h3 { color: #00e5ff; margin-top: 0; text-align: center; }
@@ -431,12 +455,12 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
         label { display: flex; justify-content: space-between; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
         span.val { color: #ffca28; font-family: monospace; }
         input[type=range] { width: 100%; accent-color: #00e5ff; }
-        select, input[type=text] { width: 100%; background: #0f111a; border: 1px solid #333b55; color: #fff; padding: 10px; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
+        select, input[type=text], input[type=file] { width: 100%; background: #0f111a; border: 1px solid #333b55; color: #fff; padding: 10px; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
         .checkbox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: #0f111a; padding: 12px; border-radius: 6px; border: 1px solid #333b55; }
         .checkbox-grid label { font-weight: normal; font-size: 13px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin: 0; cursor: pointer; }
         .checkbox-grid input[type=checkbox] { accent-color: #00e5ff; margin: 0; cursor: pointer; }
         .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
-        button { background: #00e5ff; color: #0f111a; font-weight: bold; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+        button { background: #00e5ff; color: #0f111a; font-weight: bold; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-size: 14px; width:100%; }
         button:hover { background: #80d8ff; }
     </style>
 </head>
@@ -523,6 +547,17 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <div class="card">
+        <h3>Web OTA Firmware Update</h3>
+        <form method='POST' action='/api/update' enctype='multipart/form-data'>
+            <div class="control-group">
+                <input type='file' name='update' id='ota_file' accept='.bin'>
+            </div>
+            <button type='button' onclick='uploadOTA()'>Flash Firmware</button>
+        </form>
+        <div id='ota_status' style='margin-top:15px; color:#00e5ff; font-weight:bold; text-align:center;'></div>
+    </div>
+
     <script>
         function loadValues() {
             fetch('/api/get')
@@ -530,9 +565,7 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
                 .then(d => {
                     let tz = document.getElementById('timezone');
                     tz.innerHTML = '';
-                    d.timezones.forEach((name, idx) => {
-                        tz.add(new Option(name, idx));
-                    });
+                    d.timezones.forEach((name, idx) => { tz.add(new Option(name, idx)); });
                     tz.value = d.timezone;
                     document.getElementById('dst_mode').value = d.dst_mode;
 
@@ -560,7 +593,6 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
                     document.getElementById('rotate_fonts').value = d.rotate_fonts ? 1 : 0;
                     document.getElementById('invert').value = d.invert ? 1 : 0;
                     document.getElementById('nightmode').value = d.nightmode;
-
                     document.getElementById('contrast_normal').value = d.contrast_normal;
                     document.getElementById('contrast_night').value  = d.contrast_night;
                     refreshLabels();
@@ -597,35 +629,35 @@ const char HTTP_INDEX[] PROGMEM = R"rawliteral(
                 p.append('contrast_night', document.getElementById('contrast_night').value);
 
                 fetch('/api/set?' + p.toString()).then(() => {
-                    if (triggerFlwPreview) {
-                        fetch('/api/trigger');
-                    } else if (triggerTimePreview) {
-                        fetch('/api/trigger_clock');
-                    }
+                    if (triggerFlwPreview) fetch('/api/trigger');
+                    else if (triggerTimePreview) fetch('/api/trigger_clock');
                 });
             }, 50);
         }
 
-        function previewTimeFont(idx) {
-            if (idx !== undefined) {
-                document.getElementById('font_clock').value = idx;
-            }
-            updateParam(false, true);
-        }
-
-        function previewFlwFont(idx) {
-            if (idx !== undefined) {
-                document.getElementById('font_flw').value = idx;
-            }
-            updateParam(true, false);
-        }
-
+        function previewTimeFont(idx) { if (idx !== undefined) document.getElementById('font_clock').value = idx; updateParam(false, true); }
+        function previewFlwFont(idx) { if (idx !== undefined) document.getElementById('font_flw').value = idx; updateParam(true, false); }
         function sendCustomWord() {
             let w = document.getElementById('custom_word').value.toUpperCase();
             if(w.length === 4) fetch('/api/custom?w=' + w);
         }
-
         function triggerNextWord() { fetch('/api/trigger'); }
+
+        function uploadOTA() {
+            let file = document.getElementById('ota_file').files[0];
+            if (!file) { alert('Please select a compiled firmware.bin file first.'); return; }
+            let fd = new FormData();
+            fd.append('update', file);
+            let status = document.getElementById('ota_status');
+            status.innerText = 'Uploading and Flashing... Watch the screens! Do not unplug power.';
+            fetch('/api/update', { method: 'POST', body: fd })
+            .then(r => r.text())
+            .then(t => { 
+                status.innerText = t; 
+                if(t.includes('Success')) setTimeout(() => location.reload(), 8000); 
+            })
+            .catch(e => { status.innerText = 'Upload failed. Check connection.'; });
+        }
 
         window.onload = loadValues;
     </script>
@@ -689,9 +721,7 @@ void handleSetApi() {
     if (server.hasArg("contrast_night"))  cfg_contrast_night  = server.arg("contrast_night").toInt();
 
     savePreferences();
-    if (timeChanged) {
-        applyTimezone();
-    }
+    if (timeChanged) applyTimezone();
     settingsChanged = true;
     server.send(200, "text/plain", "OK");
 }
@@ -727,13 +757,37 @@ void handleCustomWordApi() {
     server.send(200, "text/plain", "OK");
 }
 
+void handleUpdateUpload() {
+    // Feed the watchdog during the long flash writing process!
+    esp_task_wdt_reset(); 
+    
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        currentMode = MODE_OTA;
+        forceRedraw = true;
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) Serial.printf("Update Success: %uB\n", upload.totalSize);
+        else Update.printError(Serial);
+    }
+}
+
+void handleUpdateEnd() {
+    server.sendHeader("Connection", "close");
+    if (Update.hasError()) {
+        server.send(500, "text/plain", "Update Failed. Check serial monitor.");
+    } else {
+        server.send(200, "text/plain", "Update Success! Rebooting...");
+        delay(1000);
+        ESP.restart();
+    }
+}
+
 void initWatchdog() {
 #if ESP_IDF_VERSION_MAJOR >= 5
-    esp_task_wdt_config_t twdt_config = {
-        .timeout_ms = WDT_TIMEOUT_SECONDS * 1000,
-        .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-        .trigger_panic = true
-    };
+    esp_task_wdt_config_t twdt_config = { .timeout_ms = WDT_TIMEOUT_SECONDS * 1000, .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, .trigger_panic = true };
     esp_task_wdt_reconfigure(&twdt_config);
     esp_task_wdt_add(NULL);
 #else
@@ -746,13 +800,10 @@ void setup() {
     WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
     Serial.begin(115200);
 
-    initWatchdog();
-
     for (int i = 0; i < 4; i++) {
         pinMode(csPins[i], OUTPUT);
         digitalWrite(csPins[i], HIGH);
     }
-
     pinMode(OLED_RST_PIN, OUTPUT);
     digitalWrite(OLED_RST_PIN, LOW);
     delay(20);
@@ -767,50 +818,45 @@ void setup() {
         displays[i]->clear();
     }
 
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    
-    Serial.print("\nConnecting to WiFi...");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(250);
-        Serial.print(".");
+    // 1. Start Graphics Core IMMEDIATELY (It will wait in MODE_SETUP)
+    xTaskCreatePinnedToCore(displayTask, "DisplayTask", 8192, NULL, 2, NULL, 1);
+
+// 2. Start WiFiManager 
+    WiFiManager wm;
+    WiFiManagerParameter custom_ntp("ntp", "NTP Server", ntpServerName, 40);
+    wm.addParameter(&custom_ntp);
+
+    // If WiFiManager enters setup portal, Core 1 instantly draws the instructions
+    wm.setAPCallback([](WiFiManager *myWiFiManager) {
+        currentMode = MODE_SETUP;
+        forceRedraw = true;
+    });
+
+    if (!wm.autoConnect("FLW-Clock-Setup")) {
+        Serial.println("Failed to connect and hit timeout");
+        delay(3000);
+        ESP.restart();
     }
-    Serial.println("\nWiFi Connected!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+
+
+    // 3. Save NTP Server if it was changed in the captive portal
+    if (String(ntpServerName) != String(custom_ntp.getValue())) {
+        strncpy(ntpServerName, custom_ntp.getValue(), sizeof(ntpServerName));
+        prefs.begin("flwclock", false);
+        prefs.putString("ntp", ntpServerName);
+        prefs.end();
+    }
+
+    // 4. Update the global IP strings for the Boot Screen
+    String ip = WiFi.localIP().toString();
+    int dot1 = ip.indexOf('.');
+    int dot2 = ip.indexOf('.', dot1 + 1);
+    bootIpPart1 = ip.substring(0, dot2 + 1);
+    bootIpPart2 = ip.substring(dot2 + 1); 
 
     if (MDNS.begin("flwclock")) {
         Serial.println("mDNS Active: http://flwclock.local");
     }
-
-    // =========================================================================
-    // BOOT DISPLAY: DISPLAY 0 & DISPLAY 1 (HORIZONTALLY ALIGNED ON PORTRAIT PANELS)
-    // =========================================================================
-    String ip = WiFi.localIP().toString();
-    int dot1 = ip.indexOf('.');
-    int dot2 = ip.indexOf('.', dot1 + 1);
-    String ipPart1 = ip.substring(0, dot2 + 1);
-    String ipPart2 = ip.substring(dot2 + 1);     
-
-    for (int i = 0; i < 4; i++) {
-        displays[i]->clear();
-    }
-
-    // Display 0: Wi-Fi Status & IP Address
-    drawStrHorizontalOnRotatedDisplay(&display0, 7, 20, "WIFI OK");
-    drawStrHorizontalOnRotatedDisplay(&display0, 7, 42, "IP:");
-    drawStrHorizontalOnRotatedDisplay(&display0, 4, 58, ipPart1.c_str());
-    drawStrHorizontalOnRotatedDisplay(&display0, 4, 72, ipPart2.c_str());
-
-    // Display 1: mDNS Domain Name
-    drawStrHorizontalOnRotatedDisplay(&display1, 7, 20, "MDNS OK");
-    drawStrHorizontalOnRotatedDisplay(&display1, 7, 42, "HOST:");
-    drawStrHorizontalOnRotatedDisplay(&display1, 4, 58, "flwclock");
-    drawStrHorizontalOnRotatedDisplay(&display1, 4, 72, ".local");
-
-    delay(4000); 
-    // =========================================================================
 
     server.on("/", handleRoot);
     server.on("/api/get", handleGetApi);
@@ -818,24 +864,20 @@ void setup() {
     server.on("/api/trigger", handleTriggerApi);
     server.on("/api/trigger_clock", handleTriggerClockApi);
     server.on("/api/custom", handleCustomWordApi);
+    server.on("/api/update", HTTP_POST, handleUpdateEnd, handleUpdateUpload);
     server.on("/favicon.ico", []() { server.send(204); });
     server.onNotFound([]() { server.send(404, "text/plain", "404: Not Found"); });
     server.begin();
 
-    // Initialize network time using standard POSIX timezone rule
-    configTzTime(getActiveTzRule(), ntpServer);
+    configTzTime(getActiveTzRule(), ntpServerName);
 
+    // 5. Trigger the 4-second boot IP display, then standard clock operation
+    currentMode = MODE_BOOT;
+    forceRedraw = true;
     modeStartTime = millis();
 
-    xTaskCreatePinnedToCore(
-        displayTask,
-        "DisplayTask",
-        8192,
-        NULL,
-        2,
-        NULL,
-        1
-    );
+    // 6. Finally, arm the watchdog now that the blocking portal phase is over
+    initWatchdog();
 }
 
 void loop() {

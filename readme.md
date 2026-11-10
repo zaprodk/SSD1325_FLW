@@ -13,11 +13,13 @@ The firmware runs on an ESP32-S3 development board. Fonts are compiled directly 
 * **Asynchronous Dual-Core Architecture:**
   * **Core 1 (Graphics Engine):** Runs an isolated FreeRTOS task rendering clock digits, blinking colon cursors, and word transitions from a 16 KB RAM staging buffer with zero network interruptions.
   * **Core 0 (Networking & Control):** Manages WiFi auto-reconnect, NTP time synchronization, mDNS discovery (`http://flwclock.local`), watchdog monitoring, and a non-blocking HTTP REST API.
+* **Seamless WiFi Provisioning:** Integrated Captive Portal via WiFiManager allows setup of Wi-Fi credentials and custom NTP servers directly from a smartphone if no known network is found.
+* **Web OTA (Over-The-Air) Updates:** Flash new firmware binaries wirelessly directly through the web dashboard without needing a USB cable.
 * **Automatic Daylight Saving Time (DST):** Utilizes POSIX timezone strings for accurate, automatic transitions between Summer and Winter time based on regional rules.
 * **Responsive Web Dashboard:** Built-in mobile-friendly web interface allowing real-time timezone selection, font switching, brightness adjustment, automated hourly rotation configuration, custom word broadcasting, and live display previews for both Clock and FLW modes.
 * **High-Contrast Hardware Configuration:** SSD1325 internal charge pump, pre-charge timing, oscillator frequency, and VCOMH levels are configured for maximum output without panel ghosting.
 * **Automated Smart Night Mode:** Dims panels automatically during scheduled night hours (default 23:00 to 07:00, active only after valid NTP synchronization).
-* **Persistent Preferences:** All user settings (timezones, active fonts, font pools, rotation toggle, night mode preferences, brightness limits, inverted mode) are saved across power cycles in ESP32 NVS memory.
+* **Persistent Preferences:** All user settings (timezones, NTP servers, active fonts, font pools, rotation toggle, night mode preferences, brightness limits, inverted mode) are saved across power cycles in ESP32 NVS memory.
 
 ---
 
@@ -47,12 +49,38 @@ The firmware runs on an ESP32-S3 development board. Fonts are compiled directly 
 * [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://platformio.org/).
 * Python 3.8+ (with `Pillow` installed; the generation script will attempt to auto-install it if missing).
 
-### 1. Partition Configuration
+### 1. Partition Configuration (Required for OTA)
 
-Because we are storing pre-rendered images directly in the firmware binary (avoiding slow filesystem lookups), you need an expanded application partition. Create `partitions_16mb.csv` in your project root:
+Because we are storing pre-rendered images directly in the firmware binary, and supporting Over-The-Air (OTA) updates, you need a custom partition map. Create `partitions_16mb.csv` in your project root:
 
 ```csv
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x5000,
-phy_init, data, phy,     0xE000,   0x1000,
-factory,  app,  factory, 0x10000,  0x800000,
+otadata,  data, ota,     0xE000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x700000,
+app1,     app,  ota_1,   0x710000, 0x700000,
+```
+
+*Ensure your `platformio.ini` includes `board_build.partitions = partitions_16mb.csv`.*
+
+### 2. PlatformIO Dependencies
+Ensure your `platformio.ini` includes the following libraries:
+```ini
+lib_deps =
+    lexus2k/lcdgfx@^1.1.5
+    tzapu/WiFiManager@^2.0.16-rc.2
+```
+
+### 3. First-Time Setup & WiFi Provisioning
+1. Upload the firmware via USB for the very first flash.
+2. The clock will boot into Setup Mode. The left two OLED panels will instruct you to connect to the **FLW-Clock-Setup** WiFi network.
+3. Once connected, a captive portal will open on your phone. Enter your router credentials and your preferred NTP server (defaults to `pool.ntp.org`).
+4. The clock will reboot, connect to your network, and display its new IP address before starting the clock task.
+
+### 4. Web OTA (Wireless Firmware Updates)
+To add new fonts or update code without a USB cable:
+1. Compile the project in PlatformIO (`pio run`).
+2. Navigate to `http://flwclock.local` (or the clock's IP address) in your browser.
+3. Scroll to the **Web OTA Firmware Update** section.
+4. Select the freshly compiled `firmware.bin` (located in `.pio/build/esp32-s3/`) and click "Flash Firmware".
+5. The OLED panels will pause and display "FIRMWARE UPDATE IN PROGRESS", and the device will reboot itself once complete.
